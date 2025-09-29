@@ -1,0 +1,3 @@
+[console_scripts]
+egun = elephant_gun:main
+elephant-gun = elephant_gun:main

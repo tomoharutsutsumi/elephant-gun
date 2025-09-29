@@ -1,0 +1,8 @@
+elephant_gun.py
+pyproject.toml
+elephant_gun.egg-info/PKG-INFO
+elephant_gun.egg-info/SOURCES.txt
+elephant_gun.egg-info/dependency_links.txt
+elephant_gun.egg-info/entry_points.txt
+elephant_gun.egg-info/requires.txt
+elephant_gun.egg-info/top_level.txt

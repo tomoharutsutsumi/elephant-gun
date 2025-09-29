@@ -1,0 +1,8 @@
+model: sentence-transformers/all-MiniLM-L6-v2
+embed_dim: 384
+targets:
+  - table: tickets
+    key: id
+    time_column: created_at
+    text_template: "{{title}} {{body}}"
+    filters: []  # e.g., ["deleted_at IS NULL"]
