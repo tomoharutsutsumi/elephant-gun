@@ -18,19 +18,21 @@ Everything runs locally on your Postgres + Python.
 ## 🚀 Quickstart
 
 ### 1. Clone & install
+````bash
 git clone https://github.com/<yourname>/elephant-gun.git
 cd elephant-gun
 python -m venv .venv && source .venv/bin/activate
 pip install -e .
-
+````
 ### 2. Start Postgres with pgvector
 Using Docker:
+````bash
 docker run --name pg-vec -p 5433:5432 \
   -e POSTGRES_PASSWORD=postgres \
   -d pgvector/pgvector:pg14
 
 export DATABASE_URL="postgresql://postgres:postgres@localhost:5433/postgres"
-
+````
 ### 3. Prepare database
 
 ````bash
@@ -59,15 +61,17 @@ SQL
 ````
 
 ### 4. Embed & query
+````bash
 elephant-gun embed --table tickets
 elephant-gun query --table tickets --q "things that look like trouble" --days 30 --limit 10
-
+````
 ## ⚙️ CLI Commands
+````bash
 elephant-gun ensure-ext        # Enable pgvector extension
 elephant-gun init              # Add embedding column + index
 elephant-gun embed --table T   # Embed rows into vectors
 elephant-gun query --table T --q "text" [--days N --limit M --dry-run]
-
+````
 ## 🛠 Requirements
 - Python 3.9+
 - PostgreSQL 14+ with pgvector
