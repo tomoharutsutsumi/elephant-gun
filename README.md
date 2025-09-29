@@ -77,5 +77,55 @@ elephant-gun query --table T --q "text" [--days N --limit M --dry-run]
 - PostgreSQL 14+ with pgvector
 - Docker (optional, easiest way to start Postgres+pgvector)
 
+## 🔬 Fine-tuning (Optional)
+If you want to adapt Elephant Gun’s embeddings to your own domain (e.g. classify “positive feedback” vs. “refund disputes” more accurately), you can fine-tune the embedding model locally.
+
+### 1. Prepare training data
+Put your data under `train/data/` in CSV format:
+
+query,text,label  
+positive feedback,Great service, customer says they love the new dashboard and thank the team.,1  
+positive feedback,Refund dispute: customer claims double charge.,0  
+fraud issues,Chargeback received due to suspected fraud.,1  
+fraud issues,Great service thank you!,0  
+
+- `query`: the natural language query  
+- `text`: the ticket or record text  
+- `label`: similarity score (1 = close, 0 = far, values in between allowed)
+
+### 2. Run fine-tuning
+Inside the repo:
+
+````bash
+cd train  
+python train_st.py  
+````
+This will create a fine-tuned model under:
+````bash
+train/models/eg-miniLM-finetuned/
+````
+### 3. Use the fine-tuned model
+Update `elephant_gun.yaml`:
+
+````bash
+model: train/models/eg-miniLM-finetuned  
+embed_dim: 384  
+````
+Re-embed your table:
+
+````bash
+elephant-gun embed --table tickets  
+````
+Now queries will use your fine-tuned model.
+
+⚠️ **Note**:  
+- Do not commit `train/data/` or `train/models/` to Git.  
+- Add them to `.gitignore`:
+
+````bash
+train/data/  
+train/models/  
+````
+
 ## 📜 License
 MIT — see [LICENSE](LICENSE)
