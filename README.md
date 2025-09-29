@@ -32,6 +32,8 @@ docker run --name pg-vec -p 5433:5432 \
 export DATABASE_URL="postgresql://postgres:postgres@localhost:5433/postgres"
 
 ### 3. Prepare database
+
+````bash
 # Enable extension
 elephant-gun ensure-ext
 
@@ -54,6 +56,7 @@ INSERT INTO tickets (contract_id, title, body) VALUES
 (104, 'Chargeback received', 'Bank notified a chargeback likely due to fraud suspicion.')
 ON CONFLICT DO NOTHING;
 SQL
+````
 
 ### 4. Embed & query
 elephant-gun embed --table tickets
