@@ -175,6 +175,7 @@ def hybrid_query(
     days: Optional[int],
     limit: int,
     dry_run: bool,
+    min_sim: Optional[float],   # <-- NEW: filter by sim01 threshold (0..1)
 ):
     """Run a hybrid (vector-first) query on a configured target table."""
     qvec = embed_query(cfg, q)
@@ -187,6 +188,9 @@ def hybrid_query(
     t = matches[0]
 
     where = sql_filters(t, days)
+    # Build sim expression once to reuse in WHERE and SELECT
+    sim_expr = f"(1 - 0.5 * (embedding <=> '[{vec_list}]'::vector))"
+    where_extra = f" AND {sim_expr} >= {min_sim:.3f}" if min_sim is not None else ""
 
     # Minimal preview logic for demo; users can customize per table
     preview = (
@@ -198,9 +202,9 @@ def hybrid_query(
     sql = f"""
     SELECT {t.key} AS id, {preview},
            1 - (embedding <=> '[{vec_list}]'::vector) AS cosine_sim,   -- [-1, 1]
-           1 - 0.5 * (embedding <=> '[{vec_list}]'::vector) AS sim01   -- [0, 1] for display
+           {sim_expr} AS sim01                                        -- [0, 1] for display
     FROM {t.table}
-    WHERE {where} AND embedding IS NOT NULL
+    WHERE {where} AND embedding IS NOT NULL{where_extra}
     ORDER BY embedding <=> '[{vec_list}]'::vector
     LIMIT {int(limit)};
     """.strip()
@@ -212,9 +216,15 @@ def hybrid_query(
     with conn() as con:
         rows = con.execute(sql).fetchall()
 
+    # Pretty print
+    shown = 0
     for r in rows:
         rid, prev, sim, sim01 = r
         print(f"[{rid}] sim01={sim01:.3f}  {prev}")
+        shown += 1
+    if shown == 0 and min_sim is not None:
+        # Friendly hint when threshold is too strict
+        print(f"(no results ≥ min-sim {min_sim:.2f}; try lowering --min-sim or widening --days)")
 
 
 def init_targets(cfg: Config):
@@ -246,6 +256,8 @@ def main():
     p_query.add_argument("--days", type=int, default=None)
     p_query.add_argument("--limit", type=int, default=20)
     p_query.add_argument("--dry-run", action="store_true")
+    p_query.add_argument("--min-sim", type=float, default=None,
+                         help="filter by minimum sim01 score (0..1); e.g., 0.70")
 
     # New: scan subcommand (heavy logic implemented in elephant_gun.eg_scan)
     p_scan = sub.add_parser("scan", help="Inspect DB schema and propose embedding text_template per table")
@@ -272,7 +284,8 @@ def main():
     elif args.cmd == "embed":
         backfill_embeddings(cfg, table=args.table, batch=args.batch)
     elif args.cmd == "query":
-        hybrid_query(cfg, table=args.table, q=args.q, days=args.days, limit=args.limit, dry_run=args.dry_run)
+        hybrid_query(cfg, table=args.table, q=args.q, days=args.days,
+                     limit=args.limit, dry_run=args.dry_run, min_sim=args.min_sim)
     else:
         ap.print_help()
 
