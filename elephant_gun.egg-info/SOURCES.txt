@@ -1,5 +1,10 @@
-elephant_gun.py
+LICENSE
+README.md
 pyproject.toml
+elephant_gun/__init__.py
+elephant_gun/cli.py
+elephant_gun/db.py
+elephant_gun/eg_scan.py
 elephant_gun.egg-info/PKG-INFO
 elephant_gun.egg-info/SOURCES.txt
 elephant_gun.egg-info/dependency_links.txt

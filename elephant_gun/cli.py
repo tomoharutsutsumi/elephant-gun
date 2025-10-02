@@ -1,31 +1,23 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-# Elephant Gun CLI (single-file version with `scan` subcommand hook)
+# Elephant Gun CLI
 # - Local-first hybrid SQL + semantic search for PostgreSQL
-# - This file stays thin; heavy logic for `scan` lives in elephant_gun/eg_scan.py
+# - Keep this file thin. Heavy logic for `scan` lives in elephant_gun/eg_scan.py
+# - DB connection helper is shared via elephant_gun/db.py
 
-import os
-import sys
 import re
+import sys
 import argparse
 from typing import List, Optional
 
 import yaml
 from pydantic import BaseModel
 from sentence_transformers import SentenceTransformer
-import psycopg
 
-# Import the separated scan implementation
-# (Make sure you have `elephant_gun/eg_scan.py` with `scan_schema` defined)
-from elephant_gun.eg_scan import scan_schema
-
-
-# ---------- DB config ----------
-DB_URL = os.getenv(
-    "DATABASE_URL",
-    "postgres://postgres:postgres@localhost:5432/postgres"
-)
+# Package-local imports
+from .db import conn                   # shared DB connection helper
+from .eg_scan import scan_schema       # separated `scan` implementation
 
 
 # ---------- Config models ----------
@@ -51,12 +43,7 @@ def load_cfg(path: str = "elephant_gun.yaml") -> Config:
     return Config(**data)
 
 
-# ---------- DB helpers ----------
-def conn():
-    """Open a PostgreSQL connection (autocommit)."""
-    return psycopg.connect(DB_URL, autocommit=True)
-
-
+# ---------- Extension / schema helpers ----------
 def ensure_ext():
     """Ensure pgvector extension is available."""
     with conn() as con:
@@ -111,7 +98,7 @@ def iter_batch_rows_to_embed(t: Target, batch: int = 500):
     select_cols = ", ".join(sorted(cols_needed))
 
     with conn() as con:
-        # We stream by repeatedly fetching LIMIT chunks of rows where embedding is NULL
+        # Stream by repeatedly fetching LIMIT chunks of rows with NULL embeddings
         while True:
             rows = con.execute(
                 f"SELECT {select_cols} FROM {t.table} "

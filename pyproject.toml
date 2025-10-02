@@ -12,5 +12,9 @@ dependencies = [
 ]
 
 [project.scripts]
-elephant-gun = "elephant_gun:main"
-egun = "elephant_gun:main"
+elephant-gun = "elephant_gun.cli:main"
+egun = "elephant_gun.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["elephant_gun*"]
+exclude = ["train*"]

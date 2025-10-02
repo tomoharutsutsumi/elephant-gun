@@ -4,7 +4,141 @@ Version: 0.1.0
 Summary: Elephant Gun 🐘🔫 - Hybrid SQL + semantic search CLI for Postgres (local-first)
 Requires-Python: >=3.9
 Description-Content-Type: text/markdown
+License-File: LICENSE
 Requires-Dist: sentence-transformers>=3.0.0
 Requires-Dist: psycopg[binary]>=3.1.18
 Requires-Dist: pydantic>=2.6.0
 Requires-Dist: pyyaml>=6.0.1
+Dynamic: license-file
+
+# Elephant Gun 🐘🔫
+*A local-first CLI for hybrid SQL + semantic search on PostgreSQL.*
+
+Elephant Gun lets you query your existing PostgreSQL tables with a mix of:
+- **Structured filters (SQL)** — e.g., `created_at < 30 days`
+- **Semantic search (pgvector + embeddings)** — e.g., “things that look like trouble”
+
+No external APIs, no servers.  
+Everything runs locally on your Postgres + Python.
+
+## ✨ Features
+- CLI commands for setup, embedding, and querying
+- pgvector integration (cosine similarity search)
+- Sentence-transformers embeddings
+- Natural language + SQL filter fusion
+- Local-first: your data never leaves your database
+
+## 🚀 Quickstart
+
+### 1. Clone & install
+````bash
+git clone https://github.com/<yourname>/elephant-gun.git
+cd elephant-gun
+python -m venv .venv && source .venv/bin/activate
+pip install -e .
+````
+### 2. Start Postgres with pgvector
+Using Docker:
+````bash
+docker run --name pg-vec -p 5433:5432 \
+  -e POSTGRES_PASSWORD=postgres \
+  -d pgvector/pgvector:pg14
+
+export DATABASE_URL="postgresql://postgres:postgres@localhost:5433/postgres"
+````
+### 3. Prepare database
+
+````bash
+# Enable extension
+elephant-gun ensure-ext
+
+# Initialize (embedding column + index)
+elephant-gun init
+
+# Create sample table
+psql "$DATABASE_URL" <<'SQL'
+CREATE TABLE IF NOT EXISTS tickets(
+  id BIGSERIAL PRIMARY KEY,
+  contract_id BIGINT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  title TEXT,
+  body  TEXT
+);
+INSERT INTO tickets (contract_id, title, body) VALUES
+(101, 'Refund dispute', 'Customer claims double charge and requests refund.'),
+(102, 'Service outage report', 'Intermittent downtime observed by users on EU region.'),
+(103, 'Feature request', 'User asks for export to CSV. No issue reported.'),
+(104, 'Chargeback received', 'Bank notified a chargeback likely due to fraud suspicion.')
+ON CONFLICT DO NOTHING;
+SQL
+````
+
+### 4. Embed & query
+````bash
+elephant-gun embed --table tickets
+elephant-gun query --table tickets --q "things that look like trouble" --days 30 --limit 10
+````
+## ⚙️ CLI Commands
+````bash
+elephant-gun ensure-ext        # Enable pgvector extension
+elephant-gun init              # Add embedding column + index
+elephant-gun embed --table T   # Embed rows into vectors
+elephant-gun query --table T --q "text" [--days N --limit M --dry-run]
+````
+## 🛠 Requirements
+- Python 3.9+
+- PostgreSQL 14+ with pgvector
+- Docker (optional, easiest way to start Postgres+pgvector)
+
+## 🔬 Fine-tuning (Optional)
+If you want to adapt Elephant Gun’s embeddings to your own domain (e.g. classify “positive feedback” vs. “refund disputes” more accurately), you can fine-tune the embedding model locally.
+
+### 1. Prepare training data
+Put your data under `train/data/` in CSV format:
+
+query,text,label  
+positive feedback,Great service, customer says they love the new dashboard and thank the team.,1  
+positive feedback,Refund dispute: customer claims double charge.,0  
+fraud issues,Chargeback received due to suspected fraud.,1  
+fraud issues,Great service thank you!,0  
+
+- `query`: the natural language query  
+- `text`: the ticket or record text  
+- `label`: similarity score (1 = close, 0 = far, values in between allowed)
+
+### 2. Run fine-tuning
+Inside the repo:
+
+````bash
+cd train  
+python train_st.py  
+````
+This will create a fine-tuned model under:
+````bash
+train/models/eg-miniLM-finetuned/
+````
+### 3. Use the fine-tuned model
+Update `elephant_gun.yaml`:
+
+````bash
+model: train/models/eg-miniLM-finetuned  
+embed_dim: 384  
+````
+Re-embed your table:
+
+````bash
+elephant-gun embed --table tickets  
+````
+Now queries will use your fine-tuned model.
+
+⚠️ **Note**:  
+- Do not commit `train/data/` or `train/models/` to Git.  
+- Add them to `.gitignore`:
+
+````bash
+train/data/  
+train/models/  
+````
+
+## 📜 License
+MIT — see [LICENSE](LICENSE)

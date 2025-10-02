@@ -1,0 +1,7 @@
+version: 1
+schema: public
+targets:
+- table: tickets
+  key: id
+  time_column: created_at
+  text_template: coalesce(title::text,'') || ' ' || coalesce(body::text,'')
