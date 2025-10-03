@@ -10,10 +10,12 @@ import re
 import sys
 import argparse
 from typing import List, Optional
+from datetime import datetime, timedelta, timezone
 
 import yaml
 from pydantic import BaseModel
 from sentence_transformers import SentenceTransformer
+
 
 # Package-local imports
 from .db import conn                   # shared DB connection helper
@@ -154,6 +156,100 @@ def embed_query(cfg: Config, text: str):
     model = get_model(cfg)
     return model.encode(text, normalize_embeddings=True)
 
+def parse_time_window_from_text(text: str) -> tuple[Optional[int], str]:
+    """
+    Parse light-weight time expressions from natural language and return:
+      (days, cleaned_text)
+    Supported:
+      - "last N day(s)|week(s)|month(s)"  (weeks=7N, months≈30N)
+      - "past N days|weeks|months"
+      - "yesterday" (days=1)
+      - "today" (days=1)  # practical rolling day
+      - "last week" (days=7)
+      - "last month" (days=30)
+      - "since YYYY-MM-DD"  -> days = (today - date).days
+      - "YYYY-MM-DD..YYYY-MM-DD" -> days = (end - start).days + 1
+    It also removes the matched phrase(s) from the query text.
+    """
+    original = text
+    s = text.lower()
+
+    # canonicalize whitespace
+    s = re.sub(r"\s+", " ", s)
+
+    # date range: 2025-09-01..2025-09-30
+    m = re.search(r"\b(\d{4}-\d{2}-\d{2})\s*\.\.\s*(\d{4}-\d{2}-\d{2})\b", s)
+    if m:
+        try:
+            d1 = datetime.fromisoformat(m.group(1))
+            d2 = datetime.fromisoformat(m.group(2))
+            if d2 >= d1:
+                days = (d2 - d1).days + 1
+                cleaned = (s[:m.start()] + s[m.end():]).strip()
+                return days, cleaned
+        except ValueError:
+            pass  # fallthrough
+
+    # since YYYY-MM-DD
+    m = re.search(r"\bsince\s+(\d{4}-\d{2}-\d{2})\b", s)
+    if m:
+        try:
+            d1 = datetime.fromisoformat(m.group(1))
+            today = datetime.now(timezone.utc).date()
+            days = max(1, (today - d1.date()).days + 1)
+            cleaned = (s[:m.start()] + s[m.end():]).strip()
+            return days, cleaned
+        except ValueError:
+            pass
+
+    if re.search(r"\bthis week\b", s):
+        today = datetime.now(timezone.utc).date()
+        # Monday = 0
+        start = today - timedelta(days=today.weekday())
+        days = (today - start).days + 1
+        cleaned = re.sub(r"\bthis week\b", "", s).strip()
+        return days, cleaned
+
+    if re.search(r"\bthis month\b", s):
+        today = datetime.now(timezone.utc).date()
+        start = today.replace(day=1)
+        days = (today - start).days + 1
+        cleaned = re.sub(r"\bthis month\b", "", s).strip()
+        return days, cleaned
+    
+    # yesterday / today
+    if re.search(r"\byesterday\b", s):
+        cleaned = re.sub(r"\byesterday\b", "", s).strip()
+        return 1, cleaned
+    if re.search(r"\btoday\b", s):
+        cleaned = re.sub(r"\btoday\b", "", s).strip()
+        return 1, cleaned
+
+    # last week / last month
+    if re.search(r"\blast week\b", s):
+        cleaned = re.sub(r"\blast week\b", "", s).strip()
+        return 7, cleaned
+    if re.search(r"\blast month\b", s):
+        cleaned = re.sub(r"\blast month\b", "", s).strip()
+        return 30, cleaned
+
+    # last N units / past N units
+    m = re.search(r"\b(last|past)\s+(\d+)\s*(day|days|week|weeks|month|months)\b", s)
+    if m:
+        n = int(m.group(2))
+        unit = m.group(3)
+        if "week" in unit:
+            days = n * 7
+        elif "month" in unit:
+            days = n * 30
+        else:
+            days = n
+        cleaned = (s[:m.start()] + s[m.end():]).strip()
+        return max(1, days), cleaned
+
+    # no time hints found
+    return None, original
+
 
 # ---------- Query ----------
 def sql_filters(t: Target, days: Optional[int]) -> str:
@@ -177,6 +273,12 @@ def hybrid_query(
     dry_run: bool,
     min_sim: Optional[float],   # <-- NEW: filter by sim01 threshold (0..1)
 ):
+    if days is None:
+        parsed_days, cleaned = parse_time_window_from_text(q)
+        if parsed_days is not None:
+            days = parsed_days
+            q = cleaned or q  # if fully removed, keep original to avoid empty text
+
     """Run a hybrid (vector-first) query on a configured target table."""
     qvec = embed_query(cfg, q)
     vec_list = ",".join(f"{x:.7f}" for x in qvec.tolist())
