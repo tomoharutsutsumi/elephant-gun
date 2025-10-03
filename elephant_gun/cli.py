@@ -5,7 +5,7 @@
 # - Local-first hybrid SQL + semantic search for PostgreSQL
 # - Keep this file thin. Heavy logic for `scan` lives in elephant_gun/eg_scan.py
 # - DB connection helper is shared via elephant_gun/db.py
-
+import os
 import re
 import sys
 import argparse
@@ -38,11 +38,17 @@ class Config(BaseModel):
 
 
 # ---------- Config I/O ----------
-def load_cfg(path: str = "elephant_gun.yaml") -> Config:
-    """Load CLI configuration (model + embedding targets)."""
+def load_cfg(path: str = "elephant_gun.yaml", profile_path: str = "profiles/current/schema.yaml") -> Config:
     with open(path, "r") as f:
-        data = yaml.safe_load(f)
-    return Config(**data)
+        base = yaml.safe_load(f)
+    # if a scan profile exists, override targets from it
+    if os.path.exists(profile_path):
+        with open(profile_path, "r") as pf:
+            prof = yaml.safe_load(pf) or {}
+        if "targets" in prof:
+            base["targets"] = prof["targets"]
+    return Config(**base)
+
 
 
 # ---------- Extension / schema helpers ----------
@@ -263,6 +269,20 @@ def sql_filters(t: Target, days: Optional[int]) -> str:
         parts.append(f"{t.time_column} >= now() - interval '{int(days)} days'")
     return " AND ".join(parts) if parts else "TRUE"
 
+# --- add helper to build preview and WHERE once, near other helpers ---
+def _preview_sql_expr(t: Target) -> str:
+    """SQL expression to build a short preview text for any table."""
+    # Use text_template directly (already an SQL expression)
+    return f"left(({t.text_template}), 120) as preview"
+
+def _time_and_filter_where(t: Target, days: Optional[int]) -> str:
+    """Compose WHERE fragment from static filters and optional time window."""
+    parts = []
+    for f in t.filters:
+        parts.append(f"({f})")
+    if days and t.time_column:
+        parts.append(f"{t.time_column} >= now() - interval '{int(days)} days'")
+    return " AND ".join(parts) if parts else "TRUE"
 
 def hybrid_query(
     cfg: Config,
@@ -295,11 +315,7 @@ def hybrid_query(
     where_extra = f" AND {sim_expr} >= {min_sim:.3f}" if min_sim is not None else ""
 
     # Minimal preview logic for demo; users can customize per table
-    preview = (
-        "left(coalesce(title,'')||' '||coalesce(body,''), 120) as preview"
-        if t.table == "tickets"
-        else "NULL as preview"
-    )
+    preview = _preview_sql_expr(t)
 
     sql = f"""
     SELECT {t.key} AS id, {preview},
@@ -329,6 +345,98 @@ def hybrid_query(
         print(f"(no results ≥ min-sim {min_sim:.2f}; try lowering --min-sim or widening --days)")
 
 
+def query_all_targets_rrf(
+    cfg: Config,
+    q: str,
+    days: Optional[int],
+    limit: int,
+    min_sim: Optional[float],
+    per_table_limit: int = 50,
+    rrf_k: int = 60,
+):
+    """
+    Run per-table vector search, collect top-K from each, and fuse by RRF.
+    Returns a list of dict rows: {table, id, preview, sim01, cosine_sim, rank, rrf}
+    """
+    # Auto time parsing (same as single-table)
+    if days is None:
+        parsed_days, cleaned = parse_time_window_from_text(q)
+        if parsed_days is not None:
+            days = parsed_days
+            q = cleaned or q
+
+    # Encode query once
+    qvec = embed_query(cfg, q)
+    vec_list = ",".join(f"{x:.7f}" for x in qvec.tolist())
+
+    rows_by_table = {}  # table -> list of rows with rank
+    with conn() as con:
+        for t in cfg.targets:
+            where = _time_and_filter_where(t, days)
+            preview = _preview_sql_expr(t)
+            sim_expr = f"(1 - 0.5 * (embedding <=> '[{vec_list}]'::vector))"
+            where_extra = f" AND {sim_expr} >= {min_sim:.3f}" if min_sim is not None else ""
+            sql = f"""
+                SELECT '{t.table}' as table_name,
+                       {t.key} AS id,
+                       {preview},
+                       1 - (embedding <=> '[{vec_list}]'::vector) AS cosine_sim,
+                       {sim_expr} AS sim01
+                FROM {t.table}
+                WHERE {where} AND embedding IS NOT NULL{where_extra}
+                ORDER BY embedding <=> '[{vec_list}]'::vector
+                LIMIT {int(per_table_limit)};
+            """
+            try:
+                rows = con.execute(sql).fetchall()
+            except Exception as e:
+                # Skip tables that fail (e.g., permissions), but continue others
+                print(f"(skip {t.table}: {e})", file=sys.stderr)
+                rows = []
+
+            # Attach per-table rank (1-based)
+            ranked = []
+            for idx, r in enumerate(rows, start=1):
+                table_name, rid, prev, cos, sim01 = r
+                ranked.append({
+                    "table": table_name,
+                    "id": rid,
+                    "preview": prev,
+                    "cosine_sim": float(cos),
+                    "sim01": float(sim01),
+                    "rank": idx,
+                })
+            rows_by_table[t.table] = ranked
+
+    # RRF fusion
+    fused = []
+    # group by unique (table,id) or by preview text—keep (table,id) to avoid collisions
+    for table_name, items in rows_by_table.items():
+        for item in items:
+            fused.append(item)
+
+    # Compute RRF score per (table,id). If an item appears only once, it's fine.
+    # Here, since each item appears in only one table list, RRF is just 1/(k+rank).
+    # If later you mix multiple signals (lexical rank etc.), sum them here.
+    for item in fused:
+        item["rrf"] = 1.0 / (rrf_k + item["rank"])
+
+    # Sort by fused score desc, then by sim01 desc as tiebreaker
+    fused.sort(key=lambda x: (x["rrf"], x["sim01"]), reverse=True)
+
+    # Take top-N
+    top = fused[:limit]
+
+    # Pretty print for CLI
+    shown = 0
+    for it in top:
+        print(f"[{it['table']}#{it['id']}] sim01={it['sim01']:.3f}  {it['preview']}")
+        shown += 1
+    if shown == 0 and min_sim is not None:
+        print(f"(no results ≥ min-sim {min_sim:.2f}; try lowering --min-sim or widening time window)")
+    return top
+
+
 def init_targets(cfg: Config):
     """Ensure required schema objects for all targets (embedding column + indexes)."""
     for t in cfg.targets:
@@ -352,14 +460,17 @@ def main():
     p_embed.add_argument("--table", help="target table name (default: all)")
     p_embed.add_argument("--batch", type=int, default=500)
 
-    p_query = sub.add_parser("query", help="Hybrid query on a target table")
-    p_query.add_argument("--table", required=True, help="target table name (must exist in config)")
+    p_query = sub.add_parser("query", help="Hybrid query on a target table or across all targets")
+    p_query.add_argument("--table", required=False, help="target table name (if omitted, search all targets)")
     p_query.add_argument("--q", required=True, help="natural language text (semantic intent)")
     p_query.add_argument("--days", type=int, default=None)
     p_query.add_argument("--limit", type=int, default=20)
     p_query.add_argument("--dry-run", action="store_true")
     p_query.add_argument("--min-sim", type=float, default=None,
                          help="filter by minimum sim01 score (0..1); e.g., 0.70")
+    p_query.add_argument("--per-table-limit", type=int, default=50,
+                         help="top-K to fetch per table when --table is omitted (default: 50)")
+
 
     # New: scan subcommand (heavy logic implemented in elephant_gun.eg_scan)
     p_scan = sub.add_parser("scan", help="Inspect DB schema and propose embedding text_template per table")
@@ -386,8 +497,16 @@ def main():
     elif args.cmd == "embed":
         backfill_embeddings(cfg, table=args.table, batch=args.batch)
     elif args.cmd == "query":
-        hybrid_query(cfg, table=args.table, q=args.q, days=args.days,
-                     limit=args.limit, dry_run=args.dry_run, min_sim=args.min_sim)
+        if args.table:
+            hybrid_query(cfg, table=args.table, q=args.q, days=args.days,
+                         limit=args.limit, dry_run=args.dry_run, min_sim=args.min_sim)
+        else:
+            if args.dry_run:
+                print("(dry-run has no effect in all-targets mode; showing live results)")
+            query_all_targets_rrf(
+                cfg, q=args.q, days=args.days, limit=args.limit,
+                min_sim=args.min_sim, per_table_limit=args.per_table_limit
+            )
     else:
         ap.print_help()
 
