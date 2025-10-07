@@ -16,7 +16,6 @@ import yaml
 from pydantic import BaseModel
 from sentence_transformers import SentenceTransformer
 
-
 # Package-local imports
 from .db import conn                   # shared DB connection helper
 from .eg_scan import scan_schema       # separated `scan` implementation
@@ -39,9 +38,10 @@ class Config(BaseModel):
 
 # ---------- Config I/O ----------
 def load_cfg(path: str = "elephant_gun.yaml", profile_path: str = "profiles/current/schema.yaml") -> Config:
+    """Load base config and override targets from a scan profile if present."""
     with open(path, "r") as f:
         base = yaml.safe_load(f)
-    # if a scan profile exists, override targets from it
+    # If a scan profile exists, override targets from it
     if os.path.exists(profile_path):
         with open(profile_path, "r") as pf:
             prof = yaml.safe_load(pf) or {}
@@ -50,8 +50,12 @@ def load_cfg(path: str = "elephant_gun.yaml", profile_path: str = "profiles/curr
     return Config(**base)
 
 
-
 # ---------- Extension / schema helpers ----------
+def _escape_sql_literal(s: str) -> str:
+    """Very simple literal escaping for single quotes in SQL strings."""
+    return s.replace("'", "''")
+
+
 def ensure_ext():
     """Ensure pgvector extension is available."""
     with conn() as con:
@@ -90,16 +94,21 @@ def get_model(cfg: Config):
 
 
 def render_text(row: dict, template: str) -> str:
-    """Render a Jinja-lite template of '{{col}}' placeholders using row dict."""
+    """
+    Render a Jinja-lite template of '{{col}}' placeholders using a row dict.
+    Collapses excessive whitespace after substitution.
+    """
     out = template
     for k, v in row.items():
         out = out.replace("{{" + k + "}}", "" if v is None else str(v))
-    # Collapse excessive whitespace
     return re.sub(r"\s+", " ", out).strip()
 
 
 def iter_batch_rows_to_embed(t: Target, batch: int = 500):
-    """Yield rows (dicts) needing embeddings for the given target table."""
+    """
+    Yield dict rows that still need embeddings for the given target table.
+    Streams in LIMIT-sized chunks until no rows remain.
+    """
     # Collect the columns referenced by the template plus the key
     cols_needed = {t.key}
     cols_needed |= set(re.findall(r"{{\s*([a-zA-Z0-9_]+)\s*}}", t.text_template))
@@ -162,28 +171,31 @@ def embed_query(cfg: Config, text: str):
     model = get_model(cfg)
     return model.encode(text, normalize_embeddings=True)
 
+
 def parse_time_window_from_text(text: str) -> tuple[Optional[int], str]:
     """
-    Parse light-weight time expressions from natural language and return:
+    Parse lightweight time expressions from natural language and return:
       (days, cleaned_text)
+
     Supported:
       - "last N day(s)|week(s)|month(s)"  (weeks=7N, months≈30N)
       - "past N days|weeks|months"
       - "yesterday" (days=1)
-      - "today" (days=1)  # practical rolling day
-      - "last week" (days=7)
-      - "last month" (days=30)
+      - "today" (days=1) as a practical rolling day
+      - "this week" / "this month" (start to today)
+      - "last week" (7 days), "last month" (30 days)
       - "since YYYY-MM-DD"  -> days = (today - date).days
       - "YYYY-MM-DD..YYYY-MM-DD" -> days = (end - start).days + 1
-    It also removes the matched phrase(s) from the query text.
+
+    The matched phrase is removed from the query text (returned as cleaned_text).
     """
     original = text
     s = text.lower()
 
-    # canonicalize whitespace
+    # Canonicalize whitespace
     s = re.sub(r"\s+", " ", s)
 
-    # date range: 2025-09-01..2025-09-30
+    # Date range: 2025-09-01..2025-09-30
     m = re.search(r"\b(\d{4}-\d{2}-\d{2})\s*\.\.\s*(\d{4}-\d{2}-\d{2})\b", s)
     if m:
         try:
@@ -222,7 +234,7 @@ def parse_time_window_from_text(text: str) -> tuple[Optional[int], str]:
         days = (today - start).days + 1
         cleaned = re.sub(r"\bthis month\b", "", s).strip()
         return days, cleaned
-    
+
     # yesterday / today
     if re.search(r"\byesterday\b", s):
         cleaned = re.sub(r"\byesterday\b", "", s).strip()
@@ -253,7 +265,7 @@ def parse_time_window_from_text(text: str) -> tuple[Optional[int], str]:
         cleaned = (s[:m.start()] + s[m.end():]).strip()
         return max(1, days), cleaned
 
-    # no time hints found
+    # No time hints found
     return None, original
 
 
@@ -269,11 +281,13 @@ def sql_filters(t: Target, days: Optional[int]) -> str:
         parts.append(f"{t.time_column} >= now() - interval '{int(days)} days'")
     return " AND ".join(parts) if parts else "TRUE"
 
-# --- add helper to build preview and WHERE once, near other helpers ---
+
+# Preview helpers for SQL rendering
 def _preview_sql_expr(t: Target) -> str:
-    """SQL expression to build a short preview text for any table."""
+    """Return SQL expression that builds a short preview text for any table."""
     # Use text_template directly (already an SQL expression)
     return f"left(({t.text_template}), 120) as preview"
+
 
 def _time_and_filter_where(t: Target, days: Optional[int]) -> str:
     """Compose WHERE fragment from static filters and optional time window."""
@@ -284,6 +298,7 @@ def _time_and_filter_where(t: Target, days: Optional[int]) -> str:
         parts.append(f"{t.time_column} >= now() - interval '{int(days)} days'")
     return " AND ".join(parts) if parts else "TRUE"
 
+
 def hybrid_query(
     cfg: Config,
     table: str,
@@ -291,15 +306,16 @@ def hybrid_query(
     days: Optional[int],
     limit: int,
     dry_run: bool,
-    min_sim: Optional[float],   # <-- NEW: filter by sim01 threshold (0..1)
+    min_sim: Optional[float],
 ):
+    """Run a semantic-first query on a single configured table."""
+    # Auto parse time hints from the free-text query if --days not supplied
     if days is None:
         parsed_days, cleaned = parse_time_window_from_text(q)
         if parsed_days is not None:
             days = parsed_days
-            q = cleaned or q  # if fully removed, keep original to avoid empty text
+            q = cleaned or q
 
-    """Run a hybrid (vector-first) query on a configured target table."""
     qvec = embed_query(cfg, q)
     vec_list = ",".join(f"{x:.7f}" for x in qvec.tolist())
 
@@ -310,17 +326,20 @@ def hybrid_query(
     t = matches[0]
 
     where = sql_filters(t, days)
-    # Build sim expression once to reuse in WHERE and SELECT
     sim_expr = f"(1 - 0.5 * (embedding <=> '[{vec_list}]'::vector))"
     where_extra = f" AND {sim_expr} >= {min_sim:.3f}" if min_sim is not None else ""
 
-    # Minimal preview logic for demo; users can customize per table
     preview = _preview_sql_expr(t)
+
+    # FTS lexical rank (ts_rank). Note: plainto_tsquery is AND-style.
+    q_lex = _escape_sql_literal(q)
+    lex_expr = f"ts_rank(to_tsvector('english', ({t.text_template})), plainto_tsquery('english', '{q_lex}'))"
 
     sql = f"""
     SELECT {t.key} AS id, {preview},
-           1 - (embedding <=> '[{vec_list}]'::vector) AS cosine_sim,   -- [-1, 1]
-           {sim_expr} AS sim01                                        -- [0, 1] for display
+           1 - (embedding <=> '[{vec_list}]'::vector) AS cosine_sim,
+           {sim_expr} AS sim01,
+           {lex_expr} AS lex_rank
     FROM {t.table}
     WHERE {where} AND embedding IS NOT NULL{where_extra}
     ORDER BY embedding <=> '[{vec_list}]'::vector
@@ -334,14 +353,12 @@ def hybrid_query(
     with conn() as con:
         rows = con.execute(sql).fetchall()
 
-    # Pretty print
     shown = 0
     for r in rows:
-        rid, prev, sim, sim01 = r
-        print(f"[{rid}] sim01={sim01:.3f}  {prev}")
+        rid, prev, cos, sim01, lex = r
+        print(f"[{rid}] sim01={sim01:.3f} lex={float(lex):.3f}  {prev}")
         shown += 1
     if shown == 0 and min_sim is not None:
-        # Friendly hint when threshold is too strict
         print(f"(no results ≥ min-sim {min_sim:.2f}; try lowering --min-sim or widening --days)")
 
 
@@ -356,32 +373,35 @@ def query_all_targets_rrf(
 ):
     """
     Run per-table vector search, collect top-K from each, and fuse by RRF.
-    Returns a list of dict rows: {table, id, preview, sim01, cosine_sim, rank, rrf}
+    Returns a list of dict rows: {table, id, preview, sim01, cosine_sim, rank_sem, rank_lex, rrf}
     """
-    # Auto time parsing (same as single-table)
+    # Auto time parsing for all-targets mode
     if days is None:
         parsed_days, cleaned = parse_time_window_from_text(q)
         if parsed_days is not None:
             days = parsed_days
             q = cleaned or q
 
-    # Encode query once
     qvec = embed_query(cfg, q)
     vec_list = ",".join(f"{x:.7f}" for x in qvec.tolist())
+    q_lex = _escape_sql_literal(q)  # for plainto_tsquery()
 
-    rows_by_table = {}  # table -> list of rows with rank
+    rows_by_table = {}   # table -> list of items
     with conn() as con:
         for t in cfg.targets:
             where = _time_and_filter_where(t, days)
             preview = _preview_sql_expr(t)
             sim_expr = f"(1 - 0.5 * (embedding <=> '[{vec_list}]'::vector))"
             where_extra = f" AND {sim_expr} >= {min_sim:.3f}" if min_sim is not None else ""
+            lex_expr = f"ts_rank(to_tsvector('english', ({t.text_template})), plainto_tsquery('english', '{q_lex}'))"
+
             sql = f"""
                 SELECT '{t.table}' as table_name,
                        {t.key} AS id,
                        {preview},
                        1 - (embedding <=> '[{vec_list}]'::vector) AS cosine_sim,
-                       {sim_expr} AS sim01
+                       {sim_expr} AS sim01,
+                       {lex_expr} AS lex_rank
                 FROM {t.table}
                 WHERE {where} AND embedding IS NOT NULL{where_extra}
                 ORDER BY embedding <=> '[{vec_list}]'::vector
@@ -394,43 +414,44 @@ def query_all_targets_rrf(
                 print(f"(skip {t.table}: {e})", file=sys.stderr)
                 rows = []
 
-            # Attach per-table rank (1-based)
-            ranked = []
+            items = []
             for idx, r in enumerate(rows, start=1):
-                table_name, rid, prev, cos, sim01 = r
-                ranked.append({
+                table_name, rid, prev, cos, sim01, lex = r
+                items.append({
                     "table": table_name,
                     "id": rid,
                     "preview": prev,
                     "cosine_sim": float(cos),
                     "sim01": float(sim01),
-                    "rank": idx,
+                    "lex_rank": float(lex),
+                    "rank_sem": idx,  # semantic rank (smaller is better)
                 })
-            rows_by_table[t.table] = ranked
+            rows_by_table[t.table] = items
 
-    # RRF fusion
-    fused = []
-    # group by unique (table,id) or by preview text—keep (table,id) to avoid collisions
+    # Assign lexical ranks within each table (desc by lex_rank, stable order)
     for table_name, items in rows_by_table.items():
-        for item in items:
-            fused.append(item)
+        items_sorted = sorted(items, key=lambda x: x["lex_rank"], reverse=True)
+        for j, it in enumerate(items_sorted, start=1):
+            # Even if lex_rank is 0.0, still assign a rank so RRF can use it
+            it["rank_lex"] = j
 
-    # Compute RRF score per (table,id). If an item appears only once, it's fine.
-    # Here, since each item appears in only one table list, RRF is just 1/(k+rank).
-    # If later you mix multiple signals (lexical rank etc.), sum them here.
-    for item in fused:
-        item["rrf"] = 1.0 / (rrf_k + item["rank"])
+    # RRF fusion: combine semantic rank and lexical rank
+    fused = []
+    for table_name, items in rows_by_table.items():
+        for it in items:
+            rrf = 0.0
+            rrf += 1.0 / (rrf_k + it["rank_sem"])            # semantic signal
+            rrf += 1.0 / (rrf_k + it.get("rank_lex", 10**6)) # lexical signal
+            it["rrf"] = rrf
+            fused.append(it)
 
-    # Sort by fused score desc, then by sim01 desc as tiebreaker
+    # Final ordering: by fused score desc, tie-break by sim01 desc
     fused.sort(key=lambda x: (x["rrf"], x["sim01"]), reverse=True)
 
-    # Take top-N
     top = fused[:limit]
-
-    # Pretty print for CLI
     shown = 0
     for it in top:
-        print(f"[{it['table']}#{it['id']}] sim01={it['sim01']:.3f}  {it['preview']}")
+        print(f"[{it['table']}#{it['id']}] sim01={it['sim01']:.3f} lex={it['lex_rank']:.3f}  {it['preview']}")
         shown += 1
     if shown == 0 and min_sim is not None:
         print(f"(no results ≥ min-sim {min_sim:.2f}; try lowering --min-sim or widening time window)")
@@ -470,7 +491,6 @@ def main():
                          help="filter by minimum sim01 score (0..1); e.g., 0.70")
     p_query.add_argument("--per-table-limit", type=int, default=50,
                          help="top-K to fetch per table when --table is omitted (default: 50)")
-
 
     # New: scan subcommand (heavy logic implemented in elephant_gun.eg_scan)
     p_scan = sub.add_parser("scan", help="Inspect DB schema and propose embedding text_template per table")
