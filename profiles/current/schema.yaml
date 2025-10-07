@@ -1,6 +1,10 @@
 version: 1
 schema: public
 targets:
+- table: product_reviews
+  key: id
+  time_column: created_at
+  text_template: coalesce(title::text,'') || ' ' || coalesce(body::text,'')
 - table: tickets
   key: id
   time_column: created_at

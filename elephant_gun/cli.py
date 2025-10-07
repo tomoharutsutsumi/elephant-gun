@@ -105,38 +105,26 @@ def render_text(row: dict, template: str) -> str:
 
 
 def iter_batch_rows_to_embed(t: Target, batch: int = 500):
-    """
-    Yield dict rows that still need embeddings for the given target table.
-    Streams in LIMIT-sized chunks until no rows remain.
-    """
-    # Collect the columns referenced by the template plus the key
-    cols_needed = {t.key}
-    cols_needed |= set(re.findall(r"{{\s*([a-zA-Z0-9_]+)\s*}}", t.text_template))
-    select_cols = ", ".join(sorted(cols_needed))
-
+    """Yield rows with evaluated text_template as 'eg_text' for embedding."""
     with conn() as con:
-        # Stream by repeatedly fetching LIMIT chunks of rows with NULL embeddings
         while True:
             rows = con.execute(
-                f"SELECT {select_cols} FROM {t.table} "
-                f"WHERE embedding IS NULL LIMIT %s",
+                f"""
+                SELECT {t.key} AS id,
+                       ({t.text_template}) AS eg_text
+                  FROM {t.table}
+                 WHERE embedding IS NULL
+                 LIMIT %s
+                """,
                 (batch,),
             ).fetchall()
             if not rows:
                 break
-
-            # Fetch column names for dict conversion
-            names = [
-                d.name for d in con.execute(
-                    f"SELECT {select_cols} FROM {t.table} LIMIT 0"
-                ).description
-            ]
-            dicts = [dict(zip(names, r)) for r in rows]
-            yield dicts
+            # rows -> list[dict]: {"id": ..., "eg_text": "..."}
+            yield [{"id": r[0], "eg_text": r[1]} for r in rows]
 
 
 def backfill_embeddings(cfg: Config, table: Optional[str] = None, batch: int = 500):
-    """Compute embeddings for rows lacking vectors (optionally for one table)."""
     model = get_model(cfg)
     targets = [t for t in cfg.targets if (table is None or t.table == table)]
 
@@ -148,22 +136,22 @@ def backfill_embeddings(cfg: Config, table: Optional[str] = None, batch: int = 5
             if not chunk:
                 break
 
-            texts = [render_text(r, t.text_template) for r in chunk]
+            texts = [ (row["eg_text"] or "").strip() for row in chunk ]
             vecs = model.encode(texts, normalize_embeddings=True)
 
             with conn() as con:
                 with con.cursor() as cur:
-                    for r, v in zip(chunk, vecs):
+                    for row, v in zip(chunk, vecs):
                         vec_list = ",".join(f"{x:.7f}" for x in v.tolist())
                         cur.execute(
-                            f"UPDATE {t.table} SET embedding='[{vec_list}]'::vector "
-                            f"WHERE {t.key}=%s",
-                            (r[t.key],),
+                            f"UPDATE {t.table} SET embedding='[{vec_list}]'::vector WHERE {t.key}=%s",
+                            (row["id"],),
                         )
             total += len(chunk)
             print(f"[{t.table}] embedded +{len(chunk)} (total {total})")
 
         print(f"[{t.table}] embedding done: {total}")
+
 
 
 def embed_query(cfg: Config, text: str):
