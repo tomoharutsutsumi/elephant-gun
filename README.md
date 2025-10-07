@@ -3,23 +3,28 @@
 
 Elephant Gun lets you query your existing PostgreSQL tables with a mix of:
 - **Structured filters (SQL)** — e.g., `created_at < 30 days`
-- **Semantic search (pgvector + embeddings)** — e.g., “things that look like trouble”
+- **Semantic search (pgvector + embeddings)** — e.g., "things that look like trouble"
+- **Natural language time parsing** — e.g., "last week", "since 2024-01-01"
 
 No external APIs, no servers.  
 Everything runs locally on your Postgres + Python.
 
 ## ✨ Features
 - CLI commands for setup, embedding, and querying
+- **Schema scanning** - Auto-discover tables and suggest text templates
+- **Natural language time parsing** - Understands "last week", "since 2024-01-01", etc.
 - pgvector integration (cosine similarity search)
 - Sentence-transformers embeddings
 - Natural language + SQL filter fusion
+- **Multi-table search** - Query across all configured tables with RRF ranking
+- **Hybrid search** - Combines semantic similarity with lexical ranking
 - Local-first: your data never leaves your database
 
 ## 🚀 Quickstart
 
 ### 1. Clone & install
 ````bash
-git clone https://github.com/<yourname>/elephant-gun.git
+git clone https://github.com/yourusername/elephant-gun.git
 cd elephant-gun
 python -m venv .venv && source .venv/bin/activate
 pip install -e .
@@ -39,10 +44,13 @@ export DATABASE_URL="postgresql://postgres:postgres@localhost:5433/postgres"
 # Enable extension
 elephant-gun ensure-ext
 
-# Initialize (embedding column + index)
+# Scan your database schema to auto-discover tables
+elephant-gun scan
+
+# Initialize (embedding column + index) - uses scanned config
 elephant-gun init
 
-# Create sample table
+# Create sample table (optional)
 psql "$DATABASE_URL" <<'SQL'
 CREATE TABLE IF NOT EXISTS tickets(
   id BIGSERIAL PRIMARY KEY,
@@ -62,16 +70,77 @@ SQL
 
 ### 4. Embed & query
 ````bash
+# Embed your data
 elephant-gun embed --table tickets
-elephant-gun query --table tickets --q "things that look like trouble" --days 30 --limit 10
+
+# Query with automatic time parsing
+elephant-gun query --table tickets --q "things that look like trouble in the last 30 days"
+elephant-gun query --q "customer complaints from this week"
+elephant-gun query --q "refund requests since 2024-01-01"
+
+# Query across all configured tables
+elephant-gun query --q "urgent issues" --limit 20
 ````
 ## ⚙️ CLI Commands
+
+**Main commands:**
 ````bash
+elephant-gun scan              # Scan DB schema and generate config
 elephant-gun ensure-ext        # Enable pgvector extension
 elephant-gun init              # Add embedding column + index
 elephant-gun embed --table T   # Embed rows into vectors
-elephant-gun query --table T --q "text" [--days N --limit M --dry-run]
+elephant-gun query --table T --q "text" [options]
 ````
+
+**Query options:**
+````bash
+--table T          # Target table (omit to search all tables)
+--q "text"         # Natural language query (required)
+--days N           # Manual time filter (optional - auto-parsing preferred)
+--limit M          # Max results (default: 20)
+--min-sim X        # Minimum similarity score (0.0-1.0)
+--dry-run          # Show SQL without executing
+--per-table-limit  # Results per table in multi-table mode (default: 50)
+````
+
+**Automatic time parsing:**
+The query automatically understands time expressions in natural language:
+- `"last 7 days"`, `"past 2 weeks"`, `"last month"`
+- `"this week"`, `"this month"`, `"today"`, `"yesterday"`
+- `"since 2024-01-01"`, `"2024-01-01..2024-01-31"`
+
+**Aliases:**
+````bash
+egun               # Short alias for elephant-gun
+````
+
+## 🔍 Schema Scanning
+
+The `scan` command automatically discovers your database tables and suggests optimal text templates for embedding:
+
+````bash
+# Scan all tables in public schema
+elephant-gun scan
+
+# Scan specific schema
+elephant-gun scan --schema my_schema
+
+# Save to custom location
+elephant-gun scan --out my_config.yaml
+````
+
+**What it does:**
+- Discovers all tables in your database
+- Identifies primary keys and time columns
+- Suggests text templates by combining relevant columns
+- Generates a configuration file (`profiles/current/schema.yaml`)
+- Shows previews of actual data for verification
+
+**Smart column detection:**
+- **Text columns**: `title`, `name`, `body`, `description`, etc.
+- **Time columns**: `created_at`, `updated_at`, `timestamp`, etc.
+- **Fallback**: Uses categorical columns when no text fields exist
+
 ## 🛠 Requirements
 - Python 3.9+
 - PostgreSQL 14+ with pgvector
