@@ -5,6 +5,10 @@ targets:
   key: id
   time_column: created_at
   text_template: coalesce(title::text,'') || ' ' || coalesce(body::text,'')
+- table: reviews
+  key: id
+  time_column: created_at
+  text_template: coalesce(title::text,'') || ' ' || coalesce(body::text,'')
 - table: tickets
   key: id
   time_column: created_at

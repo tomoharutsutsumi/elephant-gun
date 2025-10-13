@@ -1,14 +1,15 @@
 [project]
 name = "elephant-gun"
-version = "0.1.0"
+version = "0.1.2"
 description = "Elephant Gun 🐘🔫 - Hybrid SQL + semantic search CLI for Postgres (local-first)"
 readme = "README.md"
 requires-python = ">=3.9"
+
 dependencies = [
-  "sentence-transformers>=3.0.0",
-  "psycopg[binary]>=3.1.18",
-  "pydantic>=2.6.0",
-  "pyyaml>=6.0.1",
+  "sentence-transformers>=3.0.0,<4.0.0",
+  "psycopg[binary]>=3.1.18,<3.4.0",
+  "pydantic>=2.6.0,<3.0.0",
+  "pyyaml>=6.0.1,<7.0.0",
 ]
 
 [project.scripts]
