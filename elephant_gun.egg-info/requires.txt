@@ -1,4 +1,4 @@
 sentence-transformers<4.0.0,>=3.0.0
-psycopg[binary]<3.4.0,>=3.1.18
+psycopg[binary]<4.0.0,>=3.2.4
 pydantic<3.0.0,>=2.6.0
 pyyaml<7.0.0,>=6.0.1
